@@ -15,8 +15,8 @@ import java.time.LocalDateTime;
  * t_patrol_task 表的持久化对象（PO，基础设施层）。
  *
  * 只描述「表长什么样」，业务规则在领域对象 PatrolTask。
- * obs_count / abnormal_count / started_at / finished_at 属于执行与观测汇总环节，
- * 本模块（派发/修改/详情/取消/翻任务）不写它们，落库时走表默认值。
+ * obs_count / abnormal_count / started_at / finished_at 由开工与回报完成环节写入：
+ * 开工记 started_at，回报完成记 finished_at 并把观测账（obs_count/abnormal_count）回写。
  */
 @Getter
 @Setter

@@ -19,6 +19,7 @@ public final class PatrolTaskVoConverter {
     public static PatrolTaskVO toVo(PatrolTask task) {
         return new PatrolTaskVO(task.getId(), task.getTaskNo(), task.getStationId(), task.getSiteId(),
                 task.getPatrolType(), task.getPlannedDate(), task.getExecutor(), task.getStatus(),
+                task.getObsCount(), task.getAbnormalCount(), task.getStartedAt(), task.getFinishedAt(),
                 task.getCreateTime());
     }
 

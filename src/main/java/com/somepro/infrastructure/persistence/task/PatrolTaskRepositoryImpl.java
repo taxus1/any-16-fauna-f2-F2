@@ -70,6 +70,38 @@ public class PatrolTaskRepositoryImpl implements PatrolTaskRepository {
     }
 
     @Override
+    public Mono<Boolean> start(PatrolTask task) {
+        return blocking(() -> {
+            // 守卫式流转：WHERE status = PENDING —— 并发双击只有先到的落库，
+            // 后到的 0 行命中、开工时刻不会被改写。审计字段由 MetaObjectHandler 填充。
+            PatrolTaskPO po = new PatrolTaskPO();
+            po.setStatus(task.getStatus());
+            po.setStartedAt(task.getStartedAt());
+            int rows = taskMapper.update(po, Wrappers.<PatrolTaskPO>lambdaUpdate()
+                    .eq(PatrolTaskPO::getId, task.getId())
+                    .eq(PatrolTaskPO::getStatus, PatrolTask.STATUS_PENDING));
+            return rows > 0;
+        });
+    }
+
+    @Override
+    public Mono<Boolean> complete(PatrolTask task) {
+        return blocking(() -> {
+            // 守卫式流转：WHERE status = IN_PROGRESS —— 并发重复回报只有先到的落库，
+            // 后到的 0 行命中、观测账与完成时刻不会被改写。
+            PatrolTaskPO po = new PatrolTaskPO();
+            po.setStatus(task.getStatus());
+            po.setFinishedAt(task.getFinishedAt());
+            po.setObsCount(task.getObsCount());
+            po.setAbnormalCount(task.getAbnormalCount());
+            int rows = taskMapper.update(po, Wrappers.<PatrolTaskPO>lambdaUpdate()
+                    .eq(PatrolTaskPO::getId, task.getId())
+                    .eq(PatrolTaskPO::getStatus, PatrolTask.STATUS_IN_PROGRESS));
+            return rows > 0;
+        });
+    }
+
+    @Override
     public Mono<Void> cancel(PatrolTask task) {
         return blocking(() -> {
             // 先落状态 CANCELLED（审计字段自动填充），再 @TableLogic 置 del_flag=1：

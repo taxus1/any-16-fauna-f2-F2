@@ -1,5 +1,6 @@
 package com.somepro.application.task;
 
+import com.somepro.application.task.port.TaskObsTallyPort;
 import com.somepro.common.exception.BizException;
 import com.somepro.domain.shared.model.PageResult;
 import com.somepro.domain.site.model.MonitorSite;
@@ -14,7 +15,7 @@ import reactor.core.publisher.Mono;
 import java.time.LocalDate;
 
 /**
- * 巡护任务应用层：编排巡护任务用例（派发、修改、详情、取消、条件分页）。
+ * 巡护任务应用层：编排巡护任务用例（派发、修改、详情、开工、回报完成、取消、条件分页）。
  *
  * 派发门槛（看两头）：
  * - 站得是在运行的（ACTIVE）：停用/关闭的站不再往那儿派；
@@ -22,6 +23,12 @@ import java.time.LocalDate;
  * - 同一个点同一天只挂一条还没走完的任务：前面那条待执行/执行中就先别派，
  *   等它完了或者撤了再派；已取消的不占位，那天能重派。
  * 改任务时换站/换点/改计划日期，同样要过这三道校验（占位校验排除自己）。
+ *
+ * 执行与收尾：
+ * - 开工只有待执行的任务开得了，回报完成只有执行中的任务报得了；
+ * - 手快点两下是幂等空操作：第二下没什么可动的，不重复计数、时刻不翻动；
+ * - 收尾时按任务底下的观测记录把账归拢（总条数 + 异常条数）写回任务，
+ *   与观测录入模块读同一张账；任务落 DONE 后账即封存，想补观测得另开任务。
  */
 @Service
 public class PatrolTaskAppService {
@@ -29,13 +36,16 @@ public class PatrolTaskAppService {
     private final PatrolTaskRepository taskRepository;
     private final MonitorStationRepository stationRepository;
     private final MonitorSiteRepository siteRepository;
+    private final TaskObsTallyPort obsTallyPort;
 
     public PatrolTaskAppService(PatrolTaskRepository taskRepository,
                                 MonitorStationRepository stationRepository,
-                                MonitorSiteRepository siteRepository) {
+                                MonitorSiteRepository siteRepository,
+                                TaskObsTallyPort obsTallyPort) {
         this.taskRepository = taskRepository;
         this.stationRepository = stationRepository;
         this.siteRepository = siteRepository;
+        this.obsTallyPort = obsTallyPort;
     }
 
     /** 派发巡护任务：默认待执行；taskNo 留空时由仓储层按 PT-YYYY-NNNN 生成。 */
@@ -85,6 +95,52 @@ public class PatrolTaskAppService {
     public Mono<PatrolTask> detail(Long id) {
         return taskRepository.findById(id)
                 .switchIfEmpty(Mono.error(new BizException("巡护任务不存在")));
+    }
+
+    /**
+     * 开工：待执行 -> 执行中，记下开工时刻。
+     * 重复开工（手快点两下）是幂等空操作：第二下没什么可动的，开工时刻不翻动；
+     * 已完成/已取消的任务开不了工。并发双击由仓储层守卫条件兜底，只流转一次。
+     */
+    public Mono<PatrolTask> start(Long id) {
+        return taskRepository.findById(id)
+                .switchIfEmpty(Mono.error(new BizException("巡护任务不存在")))
+                .flatMap(task -> {
+                    if (!task.start()) {
+                        return Mono.just(task);
+                    }
+                    return taskRepository.start(task)
+                            .flatMap(turned -> turned
+                                    ? Mono.just(task)
+                                    // 并发下被别人抢先流转了：按库里现状返回（时刻以先到的那下为准）
+                                    : taskRepository.findById(id)
+                                            .switchIfEmpty(Mono.error(new BizException("巡护任务不存在"))));
+                });
+    }
+
+    /**
+     * 回报完成：执行中 -> 已完成，记下完成时刻，并把这一趟的观测账数清写回任务。
+     * 还没开工的报不了完成；重复回报是幂等空操作：第二下不重复计数、完成时刻不翻动。
+     */
+    public Mono<PatrolTask> complete(Long id) {
+        return taskRepository.findById(id)
+                .switchIfEmpty(Mono.error(new BizException("巡护任务不存在")))
+                .flatMap(task -> {
+                    if (PatrolTask.STATUS_DONE.equals(task.getStatus())) {
+                        return Mono.just(task);
+                    }
+                    task.ensureCompletable();
+                    return obsTallyPort.tallyByTaskId(task.getId())
+                            .flatMap(tally -> {
+                                task.complete(tally.obsCount(), tally.abnormalCount());
+                                return taskRepository.complete(task)
+                                        .flatMap(turned -> turned
+                                                ? Mono.just(task)
+                                                // 并发下被别人抢先收尾了：按库里现状返回（账以先到的那下为准）
+                                                : taskRepository.findById(id)
+                                                        .switchIfEmpty(Mono.error(new BizException("巡护任务不存在"))));
+                            });
+                });
     }
 
     /** 取消：状态置已取消并销账（逻辑删除），名单里不再翻出来，账留在表里。 */
